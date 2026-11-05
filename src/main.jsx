@@ -15,13 +15,14 @@ const LABEL_META = {
   excited: { prompt: 'Show us your excited face!', color: '#e77862', emoji: '✦' },
   scared: { prompt: 'Show us your scared face!', color: '#9275cc', emoji: '◉' }
 };
+const ASSET_BASE = import.meta.env.BASE_URL;
 const MEMES = {
-  happy: ['/memes/happy-sun.svg', '/memes/happy-party.svg'],
-  sad: ['/memes/sad-blue.svg', '/memes/sad-rain.svg'],
-  excited: ['/memes/excited-wow.svg', '/memes/excited-stars.svg'],
-  scared: ['/memes/scared-spooky.svg', '/memes/scared-gasp.svg']
+  happy: [`${ASSET_BASE}memes/happy-sun.svg`, `${ASSET_BASE}memes/happy-party.svg`],
+  sad: [`${ASSET_BASE}memes/sad-blue.svg`, `${ASSET_BASE}memes/sad-rain.svg`],
+  excited: [`${ASSET_BASE}memes/excited-wow.svg`, `${ASSET_BASE}memes/excited-stars.svg`],
+  scared: [`${ASSET_BASE}memes/scared-spooky.svg`, `${ASSET_BASE}memes/scared-gasp.svg`]
 };
-const PLACEHOLDER_MEME = '/memes/placeholder.svg';
+const PLACEHOLDER_MEME = `${ASSET_BASE}memes/placeholder.svg`;
 const TRAINING_MINIMUM = 4;
 
 const emptySamples = () => Object.fromEntries(LABELS.map(label => [label, []]));

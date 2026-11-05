@@ -11,6 +11,12 @@ npm run dev
 
 Open the local URL printed by Vite. Camera access requires `localhost`/`127.0.0.1` or HTTPS. Allow camera access when prompted.
 
+## Deploy to GitHub Pages
+
+Push the `main` branch to GitHub. The workflow in [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml) builds and deploys the app automatically to `https://mleu8.github.io/meme/`.
+
+In the repository settings, open **Pages** and set **Source** to **GitHub Actions**. The production build uses `/meme/` as its base path so scripts and local meme artwork load from the project-page URL.
+
 ## How it works
 
 - **Training Booth** uses MobileNet as a visual feature extractor. The classifier on top is trained in TensorFlow.js from the participant’s four labeled webcam photos; it is not a pretrained emotion detector.
