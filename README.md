@@ -1,4 +1,4 @@
-# Face to Meme Lab
+# Purrception
 
 An interactive webcam prototype that trains a small expression classifier in the browser, then maps its predictions to local meme artwork.
 
@@ -19,13 +19,14 @@ In the repository settings, open **Pages** and set **Source** to **GitHub Action
 
 ## How it works
 
-- **Training Booth** uses MobileNet as a visual feature extractor. The classifier on top is trained in TensorFlow.js from the participant’s four labeled webcam photos; it is not a pretrained emotion detector.
-- Each training participant contributes one happy, sad, excited, and scared photo. The photos are printed into a one-column by four-row strip.
-- Samples accumulate across participants in the current page session, so additional people can contribute to the same classifier. The model requires at least four examples per expression before training is enabled, so the first few participants may be asked to add more examples.
-- **Meme Booth** captures four unprompted photos and classifies each captured photo once when a trained model is available. The selected meme and predicted category are stored with that row and do not change while the strip is displayed. If there is not enough training data yet, it still prints local preview memes for every row and labels them as previews rather than pretending they are model predictions.
-- Both booths use a three-second countdown and a camera-flash animation. The finished strips can be downloaded as a PNG.
-- Camera frames, feature vectors, and the trained model stay in browser memory. They are not uploaded. Refreshing or closing the page removes the samples and model. The **Delete samples & reset model** control removes them immediately.
-- Predictions are smoothed over the most recent frames. A low-confidence result shows **Try another expression** rather than choosing a meme.
+- Participants first review the image/model-training consent and must check an unchecked box before continuing. The camera is not requested until they finish the training instructions and choose **I’m ready — start training**. Declining exits without starting the camera.
+- **Training Booth** uses ml5 FaceMesh to extract normalized facial-expression measurements during the final two seconds of each training countdown. One separate still photo is captured at the end for the training strip; the saved photo pixels are not classifier inputs.
+- Each participant contributes labeled FaceMesh measurements for four selected emotions. The local classifier uses accumulated measurements for the current participant’s selected labels; it is not a pretrained emotion detector.
+- Starting another participant clears the previous participant’s photos and results but keeps the shared landmark training measurements in page memory. New measurements are added to that set. Four selected emotions must each contribute valid FaceMesh samples before the Meme Booth unlocks.
+- **Meme Booth** continuously classifies live facial-expression measurements and stabilizes predictions over a short rolling window. A matching local cat meme remains visible until the stable prediction changes; participants choose when to capture each of four photo/meme pairs. Predictions interpret visible expressions and may not reflect how a participant actually feels.
+- Training photos use the existing three-second countdown; Meme Booth photos are captured immediately when the participant presses **Take Photo**. The finished strips can be downloaded as a PNG.
+- Camera frames and captured photos are held in page memory and cleared when starting another participant. The accumulated landmark training measurements stay in page memory across participants; refreshing or closing the page clears them. Downloaded strips are files on the participant’s device and are not deleted by the app.
+- This repository contains no application server, upload endpoint, or persistent browser storage for participant data. The app code does not send participant images or landmark measurements to a server. It does load Google Fonts and ml5/MediaPipe dependencies; hosting and dependency-provider access/log retention is not established by this repository and should be confirmed before public participant use.
 - The labels describe the expression being performed for the camera, not the participant’s actual feelings.
 
 ## Replace the meme images
