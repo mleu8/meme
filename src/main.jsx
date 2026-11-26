@@ -5,6 +5,7 @@ import {
   Camera, Check, ChevronRight, Download, LockKeyhole, RefreshCw, Sparkles,
   Trash2, TriangleAlert, Users
 } from 'lucide-react';
+import { extractFaceFeatures, predictExpression, trainClassifier } from './classifier.js';
 import './styles.css';
 
 const EMOTIONS = ['angry', 'awkward', 'disgusted', 'happy', 'scared', 'serious', 'shocked', 'stressed', 'tired'];
@@ -39,31 +40,6 @@ const PREDICTION_HOLD_MS = 300;
 const PREDICTION_SAMPLE_INTERVAL_MS = 100;
 const JOURNEY_STAGES = ['Consent', 'Train the model', 'Try the meme booth', 'Download'];
 
-const euclideanDistance = (left, right) => Math.sqrt(
-  left.reduce((sum, value, index) => sum + (value - right[index]) ** 2, 0)
-);
-
-const point = (face, index) => face?.keypoints?.[index];
-
-const distance = (first, second) => {
-  if (!first || !second) return null;
-  return Math.hypot(first.x - second.x, first.y - second.y);
-};
-
-const validVector = vector => Array.isArray(vector)
-  && vector.length === 8
-  && vector.every(value => Number.isFinite(value));
-
-const predictLabel = (features, classifier) => {
-  if (!validVector(features) || !classifier?.centroids?.length) return null;
-  return classifier.centroids.reduce((best, candidate) => {
-    const distance = euclideanDistance(features, candidate.average);
-    return !best || distance < best.distance
-      ? { label: candidate.label, distance }
-      : best;
-  }, null)?.label ?? null;
-};
-
 const waitForVideoFrame = video => {
   if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
     return Promise.resolve();
@@ -89,25 +65,6 @@ const waitForVideoFrame = video => {
     video.addEventListener('resize', check);
     check();
   });
-};
-
-// Uses MediaPipe FaceMesh indices for the 468-point face mesh.
-const extractFaceFeatures = face => {
-  if (!face?.keypoints) return null;
-  const faceWidth = distance(point(face, 234), point(face, 454));
-  if (!faceWidth || faceWidth <= 1) return null;
-
-  const vector = [
-    distance(point(face, 61), point(face, 291)) / faceWidth,
-    distance(point(face, 13), point(face, 14)) / faceWidth,
-    distance(point(face, 159), point(face, 145)) / faceWidth,
-    distance(point(face, 386), point(face, 374)) / faceWidth,
-    distance(point(face, 105), point(face, 159)) / faceWidth,
-    distance(point(face, 334), point(face, 386)) / faceWidth,
-    distance(point(face, 61), point(face, 13)) / faceWidth,
-    distance(point(face, 291), point(face, 14)) / faceWidth
-  ];
-  return validVector(vector) ? vector : null;
 };
 
 const selectMeme = (emotion) => {
@@ -213,6 +170,7 @@ function App() {
   const [trainingCaptureStatus, setTrainingCaptureStatus] = useState('ready');
   const [currentFeatures, setCurrentFeatures] = useState(null);
   const [rawPrediction, setRawPrediction] = useState(null);
+  const [predictionStatus, setPredictionStatus] = useState('waiting');
   const [currentPredictedEmotion, setCurrentPredictedEmotion] = useState(null);
   const [currentDisplayedMeme, setCurrentDisplayedMeme] = useState('');
   const [loadedMeme, setLoadedMeme] = useState('');
@@ -233,6 +191,7 @@ function App() {
   const classifierRef = useRef(null);
   const screenRef = useRef(screen);
   const rawPredictionRef = useRef(null);
+  const predictionStatusRef = useRef('waiting');
   const currentPredictedEmotionRef = useRef(null);
   const currentDisplayedMemeRef = useRef('');
   const predictionHistoryRef = useRef([]);
@@ -244,17 +203,21 @@ function App() {
   const currentEmotion = selectedEmotions[trainingIndex];
   const totalTraining = trainingPhotos.length;
   const modelReady = classifierReady && trainingPhotos.length === TRAINING_COUNT;
+  const availableEmotions = classifierRef.current?.classes.map(item => item.label) || [];
   const clearLivePrediction = useCallback(() => {
     if (!rawPredictionRef.current
       && !currentPredictedEmotionRef.current
       && !currentDisplayedMemeRef.current
-      && !predictionHistoryRef.current.length) return;
+      && !predictionHistoryRef.current.length
+      && predictionStatusRef.current === 'waiting') return;
     rawPredictionRef.current = null;
+    predictionStatusRef.current = 'waiting';
     currentPredictedEmotionRef.current = null;
     currentDisplayedMemeRef.current = '';
     predictionHistoryRef.current = [];
     predictionCandidateRef.current = null;
     setRawPrediction(null);
+    setPredictionStatus('waiting');
     setCurrentPredictedEmotion(null);
     setCurrentDisplayedMeme('');
     setLoadedMeme('');
@@ -401,9 +364,12 @@ function App() {
       setCurrentFeatures(features);
 
       if (screenRef.current === 'meme' && classifierRef.current) {
-        const label = predictLabel(features, classifierRef.current);
+        const prediction = predictExpression(features, classifierRef.current);
+        const label = prediction.label;
         rawPredictionRef.current = label;
         setRawPrediction(label);
+        predictionStatusRef.current = prediction.state;
+        setPredictionStatus(prediction.state);
         if (label) {
           const history = predictionHistoryRef.current
             .filter(sample => now - sample.timestamp <= PREDICTION_WINDOW_MS);
@@ -431,6 +397,18 @@ function App() {
             setCurrentDisplayedMeme(meme);
             setLoadedMeme('');
             setMemeNotice('');
+          }
+        } else {
+          const hadPredictionHistory = predictionHistoryRef.current.length > 0;
+          predictionHistoryRef.current = [];
+          predictionCandidateRef.current = null;
+          if (hadPredictionHistory) setPredictionHistory([]);
+          if (currentPredictedEmotionRef.current || currentDisplayedMemeRef.current) {
+            currentPredictedEmotionRef.current = null;
+            currentDisplayedMemeRef.current = '';
+            setCurrentPredictedEmotion(null);
+            setCurrentDisplayedMeme('');
+            setLoadedMeme('');
           }
         }
       }
@@ -605,22 +583,10 @@ function App() {
   };
 
   useEffect(() => {
-    if (!selectedEmotions.length) return;
-    const complete = selectedEmotions.every(label =>
-      trainingData.some(sample => sample.label === label)
-    );
-    if (!complete) return;
-
-    const centroids = selectedEmotions.map(label => {
-      const samples = trainingData.filter(sample => sample.label === label);
-      const average = samples[0].features.map((_, featureIndex) =>
-        samples.reduce((sum, sample) => sum + sample.features[featureIndex], 0) / samples.length
-      );
-      return { label, average };
-    });
-    classifierRef.current = { centroids };
-    setClassifierReady(true);
-  }, [trainingData, selectedEmotions]);
+    const classifier = trainClassifier(trainingData);
+    classifierRef.current = classifier;
+    setClassifierReady(Boolean(classifier));
+  }, [trainingData]);
 
   const captureMeme = () => {
     if (!hasConsent) return;
@@ -628,7 +594,9 @@ function App() {
     const label = currentPredictedEmotionRef.current;
     const meme = currentDisplayedMemeRef.current;
     if (!faceDetectedRef.current || !label || !meme) {
-      setMemeNotice('Move into frame and wait for a stable expression reading before taking a photo.');
+      setMemeNotice(predictionStatusRef.current === 'uncertain'
+        ? 'The model is uncertain. Try a clearer expression before taking a photo.'
+        : 'Move into frame and wait for a stable expression reading before taking a photo.');
       return;
     }
     if (loadedMeme !== meme) {
@@ -706,8 +674,6 @@ function App() {
     setSelectedEmotions([]);
     setTrainingPhotos([]);
     setTrainingCaptureStatus('ready');
-    setClassifierReady(false);
-    classifierRef.current = null;
     setMemePhotos([]);
     setStripReady(false);
     setMemeNotice('');
@@ -716,6 +682,17 @@ function App() {
     setEvaluationIndex(0);
     setNotice('');
     setMemeNotice('');
+  };
+
+  const resetAllTrainingData = () => {
+    const confirmed = window.confirm(
+      'Reset all shared training data in this page session? This local demo action is not restricted to administrators.'
+    );
+    if (!confirmed) return;
+    setTrainingData([]);
+    classifierRef.current = null;
+    setClassifierReady(false);
+    reset();
   };
 
   const journeyStage = ['intro', 'consent', 'declined'].includes(screen) ? 0
@@ -743,6 +720,8 @@ function App() {
       ).join(', ') || 'none'}</span>
       <span>Feature vector: {currentFeatures ? currentFeatures.map(value => value.toFixed(3)).join(', ') : 'none'}</span>
       <span>Classifier trained: {classifierReady ? 'yes' : 'no'}</span>
+      <span>Prediction state: {predictionStatus}</span>
+      <span>Available labels: {availableEmotions.join(', ') || 'none'}</span>
       <span>FaceMesh ready: {faceMeshReady ? 'yes' : 'no'}</span>
       <span>Raw prediction: {rawPrediction || 'none'}</span>
       <span>Stable prediction: {currentPredictedEmotion || 'none'}</span>
@@ -760,7 +739,7 @@ function App() {
     {screen === 'trainingIntro' && <InstructionScreen
       eyebrow="stage two / train the model"
       heading="Train the model"
-      text="Labeled facial-landmark measurements from each participant are added to a shared in-memory training set for the local classifier. They stay in this page across participants until it is refreshed or closed; saved snapshots are separate photos for your strip."
+      text="FaceMesh turns live frames into normalized, labeled facial-landmark measurements. Each participant’s examples are added to the shared in-memory classifier, so earlier emotion categories remain available even if you skip them. The dataset clears when this page is refreshed or closed."
       steps={[
         'You’ll be prompted to show different expressions. Follow the prompt and hold your expression during capture.',
         'Training capture begins when the countdown reaches 2. Hold your expression until capture finishes.',
@@ -773,13 +752,14 @@ function App() {
       selectedEmotions, toggleEmotion, currentEmotion, trainingIndex, trainingPhotos,
       captureTraining, runCountdown, captureBusy, countdown, flash, cameraState,
       cameraError, startCamera, videoRef, enterMemeBooth, notice, modelReady,
-      faceMeshReady, trainingCaptureStatus, onReviewInstructions: () => setScreen('trainingIntro'), reset
+      faceMeshReady, trainingCaptureStatus, onReviewInstructions: () => setScreen('trainingIntro'), reset,
+      resetAllTrainingData
     }} />}
-    {screen === 'trainingComplete' && <TransitionScreen heading="Training Complete" text="You've shown the AI how you express four different emotions. Now let's see how well it can read you without being told what emotion you're making." button="Enter the Meme Booth" onClick={enterMemeBooth} photos={trainingPhotos} onDownload={() => downloadStrip(trainingPhotos, false)} />}
+    {screen === 'trainingComplete' && <TransitionScreen heading="Training Complete" text="Your labeled measurements have been added to the shared classifier alongside examples from earlier participants. Now let’s see how it interprets a new expression." button="Enter the Meme Booth" onClick={enterMemeBooth} photos={trainingPhotos} onDownload={() => downloadStrip(trainingPhotos, false)} />}
     {screen === 'memeIntro' && <InstructionScreen
       eyebrow="stage three / try the meme booth"
       heading="Try the meme booth"
-      text="The trained model interprets visible expressions and matches them with local memes; its reading may differ from how you actually feel."
+      text="The trained model can use every emotion category collected from consenting participants in this page session, even if you skipped that label. It may show “Uncertain” when no category is a confident match; its reading may differ from how you actually feel."
       steps={[
         'Make an expression and watch the matching meme change beside your live camera view.',
         'Adjust your expression to see how the model responds.',
@@ -791,12 +771,13 @@ function App() {
     {screen === 'meme' && <MemeBooth {...{
       memePhotos, captureMeme, captureBusy, flash, cameraState, cameraError,
       startCamera, videoRef, memeNotice, faceMeshReady, faceDetected,
-      currentPredictedEmotion, currentDisplayedMeme, loadedMeme,
+      currentPredictedEmotion, currentDisplayedMeme, loadedMeme, predictionStatus,
+      availableEmotions,
       handleLiveMemeLoad, handleLiveMemeError,
       onReviewInstructions: () => setScreen('memeIntro')
     }} />}
     {screen === 'evaluate' && <EvaluationScreen item={evaluations[evaluationIndex]} index={evaluationIndex} onEvaluate={recordEvaluation} />}
-    {screen === 'results' && <ResultsScreen {...{ memePhotos, evaluations, sessionData, reset }} />}
+    {screen === 'results' && <ResultsScreen {...{ memePhotos, evaluations, sessionData, reset, resetAllTrainingData }} />}
     <footer><span><Users size={14} /> {trainingPhotos.length}/4 photos · {trainingData.length} shared measurements</span><span>Predictions are interpretations of expressions, not feelings.</span></footer>
   </main>;
 }
@@ -854,14 +835,14 @@ function ConsentScreen({ onAgree, onExit }) {
   return <section className="instruction-card consent-card">
     <div className="eyebrow"><span className="eyebrow-dot" /> required consent / before camera access</div>
     <h1>Before you begin: <em>image capture and model training</em></h1>
-    <p className="consent-lead">During the first training step, the camera will capture images of you as you follow the expression prompts. These images will be used to train our model to associate your facial expressions with the prompted labels.</p>
-    <p className="consent-model-note"><strong>How this model actually learns:</strong> FaceMesh processes live camera frames into facial-landmark measurements, and those labeled measurements train the classifier. The final still image is saved for your photo strip; its pixels are not model input.</p>
+    <p className="consent-lead">During the first training step, the camera analyzes live images of you as you follow expression prompts. Facial-landmark measurements from those images are labeled with each prompt and used to train the model.</p>
+    <p className="consent-model-note"><strong>How this model actually learns:</strong> FaceMesh processes live camera frames into normalized facial-landmark measurements; those labeled measurements train the classifier. A separate final still image is captured for your photo strip. Still-image pixels are not model input.</p>
     <div className="consent-details">
       <h2>Data, access and deletion</h2>
       <ul>
-        <li><strong>Processing and storage:</strong> Camera frames and captured photos are handled in this browser. Labeled facial-landmark measurements are retained in a shared training set in page memory and used to build the local classifier. They remain when starting another participant. The app has no upload endpoint or persistent browser storage; refreshing or closing this page clears the in-memory data. Still-photo pixels are not classifier input.</li>
+        <li><strong>Processing and storage:</strong> Camera frames are processed in this browser. Labeled facial-landmark measurements (not face images) are retained in a shared training set in page memory and used to build the local classifier. They remain when starting another participant. The app has no upload endpoint or persistent browser storage; refreshing or closing this page clears the in-memory data. Training and meme-booth still photos are held separately for the current participant’s photo strips, not used as classifier input, and cleared when starting another participant.</li>
         <li><strong>Who can access it:</strong> The open page and people with access to this browser or device. This project has no participant accounts or app backend. A downloaded photo strip is a file on your device.</li>
-        <li><strong>When it is cleared:</strong> “Start another participant” clears the current participant’s photos and results but keeps the shared training measurements. Refresh or close the page to clear all in-memory data. The app does not delete photo strips you download.</li>
+        <li><strong>When it is cleared:</strong> “Start another participant” clears the current participant’s photos and results but keeps the shared training measurements. “Reset all training data” clears the shared set and current session; this local demo action is not administrator-restricted. Refresh or close the page also clears all in-memory data. The app does not delete photo strips you download.</li>
       </ul>
       <p className="consent-unknown"><strong>Still to confirm before public use:</strong> The project loads Google Fonts and ml5/MediaPipe dependencies. The repository does not establish what network or hosting logs those providers retain, or who can access them. No participant images or landmark measurements are sent by the app to an application server.</p>
     </div>
@@ -872,7 +853,7 @@ function ConsentScreen({ onAgree, onExit }) {
     </ol>
     <label className="consent-checkbox">
       <input type="checkbox" checked={checked} onChange={event => setChecked(event.target.checked)} />
-      <span>I consent to my images being captured during training and used to train this project’s model.</span>
+      <span>I consent to live camera analysis and capture of my training photos, and to my labeled facial-landmark measurements being added to this project’s shared model for this page session.</span>
     </label>
     <div className="consent-actions">
       <button className="button yellow" onClick={onAgree} disabled={!checked}>I agree — continue to training</button>
@@ -891,15 +872,30 @@ function DeclinedScreen({ onReturn }) {
 }
 
 function TrainingSelection({ selectedEmotions, toggleEmotion, onContinue }) {
-  return <section className="booth-page">
-    <div className="booth-intro"><div className="eyebrow"><span className="eyebrow-dot" /> stage two / train the model</div><h1>Choose your <em>emotions.</em></h1><p>Choose four labels and add your measurements to the shared training set from previous participants.</p></div>
-    <ol className="instruction-steps selection-steps">
-      <li>Choose four different expression labels.</li>
-      <li>Follow each matching prompt during training.</li>
-      <li>The labeled measurements train the model; the photos are saved separately for your strip.</li>
-    </ol>
-    <EmotionPicker {...{ selectedEmotions, toggleEmotion }} />
-    <div className="selection-footer"><b>{selectedEmotions.length}/4 selected</b><span>Everyone expresses emotions differently. Choose four emotions and show the AI what they look like on you.</span>{selectedEmotions.length === TRAINING_COUNT && <button className="button yellow" onClick={onContinue}>Continue to training instructions <ChevronRight size={17} /></button>}</div>
+  return <section className="booth-page selection-page">
+    <header className="selection-heading">
+      <div className="eyebrow"><span className="eyebrow-dot" /> step 2 · training</div>
+      <h1>Pick four <em>expressions.</em></h1>
+      <p>Choose the faces you’ll make for the camera. Your labeled measurements join the examples already collected in this session.</p>
+    </header>
+    <div className="selection-layout">
+      <aside className="selection-notes">
+        <h2>Before the camera</h2>
+        <ol className="instruction-steps selection-steps">
+          <li>Choose four different expressions.</li>
+          <li>Follow each prompt and hold your face while it captures.</li>
+          <li>The model learns from measurements; photos are saved separately for your strip.</li>
+        </ol>
+        <p>There’s no single “right” face. Show the expressions in your own way.</p>
+      </aside>
+      <div className="selection-workspace">
+        <EmotionPicker {...{ selectedEmotions, toggleEmotion }} />
+        <div className="selection-footer">
+          <b>{selectedEmotions.length} of 4 chosen</b>
+          {selectedEmotions.length === TRAINING_COUNT && <button className="button yellow" onClick={onContinue}>Continue to training <ChevronRight size={17} /></button>}
+        </div>
+      </div>
+    </div>
   </section>;
 }
 
@@ -915,7 +911,7 @@ function EvaluationScreen({ item, index, onEvaluate }) {
   return <section className="evaluation-card"><div className="eyebrow"><span className="eyebrow-dot purple" /> evaluate the interpretation</div><h1>AI read your expression as: <em>{item?.label}</em></h1><p className="evaluation-progress">{index + 1} of 4 evaluated</p><div className="evaluation-pair"><img src={item?.photo} alt={`Participant photo ${index + 1}`} /><img src={item?.meme} alt={`${item?.label} cat meme`} /></div><h2>Did the AI read your expression the way you intended?</h2><div className="evaluation-actions"><button className="button yes" onClick={() => onEvaluate(true)}>👍 Yes</button><button className="button no" onClick={() => onEvaluate(false)}>👎 No</button></div></section>;
 }
 
-function ResultsScreen({ memePhotos, evaluations, reset }) {
+function ResultsScreen({ memePhotos, evaluations, reset, resetAllTrainingData }) {
   const agreementCount = evaluations.filter(item => item.accurate).length;
   return <section className="results-screen">
     <div className="booth-intro"><div className="eyebrow"><span className="eyebrow-dot" /> stage four / download</div><h1>The AI got <em>{agreementCount} out of 4</em> right.</h1><p>You agreed with the AI {agreementCount * 25}% of the time.</p></div>
@@ -930,7 +926,7 @@ function ResultsScreen({ memePhotos, evaluations, reset }) {
     </div>
     <PhotoStrip photos={memePhotos} type="meme" />
     <p className="closing-message"><b>Thanks for training the AI.</b><br />Your expressions helped teach the system, and your feedback helped evaluate its interpretations.</p>
-    <div className="strip-actions"><button className="button dark" onClick={() => downloadStrip(memePhotos)}><Download size={17} /> Download photo strip</button><button className="button cream dark-text" onClick={reset}><RefreshCw size={16} /> Start another participant</button></div>
+    <div className="strip-actions"><button className="button dark" onClick={() => downloadStrip(memePhotos)}><Download size={17} /> Download photo strip</button><button className="button cream dark-text" onClick={reset}><RefreshCw size={16} /> Start another participant</button><button className="button cream dark-text reset-training-data" onClick={resetAllTrainingData}><Trash2 size={16} /> Reset all training data — local demo, not admin-only</button><p className="reset-demo-note">This local demo control is not administrator-restricted.</p></div>
   </section>;
 }
 
@@ -939,7 +935,7 @@ function TrainingBooth(props) {
     selectedEmotions, toggleEmotion, currentEmotion, trainingIndex, trainingPhotos,
     runCountdown, captureBusy, countdown, flash, cameraState, cameraError,
     startCamera, videoRef, enterMemeBooth, notice, modelReady, faceMeshReady,
-    trainingCaptureStatus, onReviewInstructions, reset
+    trainingCaptureStatus, onReviewInstructions, reset, resetAllTrainingData
   } = props;
   const choosing = selectedEmotions.length < TRAINING_COUNT;
   const complete = trainingPhotos.length === TRAINING_COUNT;
@@ -968,7 +964,7 @@ function TrainingBooth(props) {
             : <button className="button yellow wide" onClick={enterMemeBooth}><ChevronRight size={17} /> Enter Meme Booth</button>}
         </div>
       </div>
-      <div className="strip-column">{complete ? <PhotoStrip photos={trainingPhotos} type="training" /> : <EmptyStrip type="training" photos={trainingPhotos} />}<h2 className="thank-you">{complete ? 'Your expressions are trained.' : `${trainingPhotos.length} of 4 training photos captured`}</h2>{complete && <div className="strip-actions"><button className="button dark" onClick={enterMemeBooth}>Start posing freely <ChevronRight size={17} /></button><button className="button cream dark-text" onClick={reset}><RefreshCw size={16} /> Start another participant</button></div>}</div>
+      <div className="strip-column">{complete ? <PhotoStrip photos={trainingPhotos} type="training" /> : <EmptyStrip type="training" photos={trainingPhotos} />}<h2 className="thank-you">{complete ? 'Your expressions are trained.' : `${trainingPhotos.length} of 4 training photos captured`}</h2>{complete && <div className="strip-actions"><button className="button dark" onClick={enterMemeBooth}>Start posing freely <ChevronRight size={17} /></button><button className="button cream dark-text" onClick={reset}><RefreshCw size={16} /> Start another participant</button><button className="button cream dark-text reset-training-data" onClick={resetAllTrainingData}><Trash2 size={16} /> Reset all training data — local demo, not admin-only</button><p className="reset-demo-note">This local demo control is not administrator-restricted.</p></div>}</div>
     </div>}
     {choosing && <div className="selection-footer"><b>{selectedEmotions.length} of 4 emotions selected</b><span>Pick four different labels to unlock the training camera.</span></div>}
     {notice && <p className="notice" role="status" aria-live="polite">{notice}</p>}
@@ -988,7 +984,7 @@ function MemeBooth(props) {
     memePhotos, captureMeme, captureBusy, flash, cameraState, cameraError, startCamera,
     videoRef, memeNotice, faceMeshReady, faceDetected, currentPredictedEmotion,
     currentDisplayedMeme, loadedMeme, handleLiveMemeLoad, handleLiveMemeError,
-    onReviewInstructions
+    onReviewInstructions, predictionStatus, availableEmotions
   } = props;
   const canCapture = faceMeshReady
     && cameraState === 'ready'
@@ -998,7 +994,9 @@ function MemeBooth(props) {
     && loadedMeme === currentDisplayedMeme;
   const readingMessage = !faceDetected
     ? 'Move into frame so the AI can read your expression.'
-    : 'Reading your expression…';
+    : predictionStatus === 'uncertain'
+      ? 'Uncertain — try a clearer expression.'
+      : 'Reading your expression…';
   const retryingCapture = memeNotice.toLowerCase().includes('photo could not be captured');
 
   return <section className="booth-page">
@@ -1019,7 +1017,7 @@ function MemeBooth(props) {
           />}
           {!currentDisplayedMeme && <p className="meme-live-placeholder">{readingMessage}</p>}
         </div>
-        <p className="meme-panel-label">
+        <p className={`meme-panel-label ${predictionStatus === 'uncertain' ? 'uncertain' : ''}`}>
           {currentPredictedEmotion
             ? `AI reads your expression as: ${currentPredictedEmotion.toUpperCase()}`
             : readingMessage}
@@ -1029,6 +1027,7 @@ function MemeBooth(props) {
     <div className="meme-guidance">
       <p>Make an expression and watch the matching meme change beside your live camera view. Adjust your expression to see how the model responds. When you’re happy with the result, select <strong>Take photo</strong>.</p>
       <p>The result is the model’s interpretation of visible expressions, which may differ from how you actually feel.</p>
+      {availableEmotions.length > 0 && <p className="available-emotions"><strong>Model categories available:</strong> {availableEmotions.join(', ')}</p>}
     </div>
     <div className="meme-booth-controls">
       <div className="progress-dots">{[0, 1, 2, 3].map(index =>
